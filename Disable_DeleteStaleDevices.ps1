@@ -3,6 +3,8 @@ $modules = @(
     "Microsoft.Graph.Authentication",
     "Microsoft.Graph.Identity.DirectoryManagement",
     "Microsoft.Graph.Identity.SignIns"
+    "WindowsAutoPilotIntune"
+    "LAPS"
 )
 
 foreach ($module in $modules) {
@@ -14,11 +16,11 @@ foreach ($module in $modules) {
 }
 
 # Connect to MgGraph 
-Connect-MgGraph ` 
-    -Scopes "Device.ReadWrite.All", "BitLockerKey.Read.All" `
+Connect-MgGraph `
+    -Scopes "Device.ReadWrite.All", "BitLockerKey.Read.All", "DeviceManagementServiceConfig.ReadWrite.All" `
     -UseDeviceAuthentication
 
-# Export stale devices that haven't signed in past 240 days
+# Variable to set number of days for device inactivety
 $dt = (Get-Date).AddDays(-365)
 
 Get-MgDevice -All | Where-Object {
@@ -36,6 +38,27 @@ if ($Confirmation -ne 'Y' -and $Confirmation -ne 'Yes') {
 
 # Import stale devices CSV
 $Devices = Import-Csv "DevicesNoActivity_365.csv"
+
+# Checks to see if device is in AutoPilot and adds "HasAutoPilot" as a header
+$AutoPilotDevices = Get-AutopilotDevice
+
+foreach ($Device in $Devices) {
+    $AutoPilotMatch = $AutoPilotDevices |
+        Where-Object { $_.azureActiveDirectoryDeviceId -eq $Device.Id } |
+        Select-Object -First 1
+ 
+    $Device | Add-Member -MemberType NoteProperty -Name "HasAutoPilot" -Value ($null -ne $AutoPilotMatch)
+}
+
+#Adds "AutoPilotId" as a header
+foreach ($Device in $Devices) {
+    $AutoPilotId = $AutoPilotDevices |
+        Where-Object { $_.azureActiveDirectoryDeviceId -eq $Device.Id } |
+        Select-Object -First 1 -ExpandProperty Id
+ 
+    $Device | Add-Member -MemberType NoteProperty -Name "AutoPilotId" -Value $AutoPilotId
+}
+
 
 # Prepare BitLocker recovery key output
 
@@ -133,7 +156,11 @@ $Disable = @{
 # Disables/Deletes stale devices based on TrustType
 foreach ($Device in $Devices) {
 	
-	if ($Device.TrustType -eq "AzureAD") {
+	if ($Device.TrustType -eq "AzureAD" -and $Device.HasAutoPilot -eq $true ) {
+
+        Write-Host "Deleting $($Device.DisplayName) [$($Device.Id)] from AutoPilot"
+        
+        Remove-AutopilotDevice -Id $Device.AutoPilotId
 
         Write-Host "Disabling $($Device.DisplayName) [$($Device.Id)]" 
 
@@ -143,14 +170,23 @@ foreach ($Device in $Devices) {
 		
 		Write-Host "Deleting $($Device.DisplayName) [$($Device.Id)]"
 
-        Remove-MgDevice `
-            -DeviceId $Device.Id
+        Remove-MgDevice -DeviceId $Device.Id
 	}
-	if ($Device.TrustType -eq "ServerAD" -or $Device.TrustType -eq "Workplace") {
+    elseIf ($Device.TrustType -eq "AzureAD" -and $Device.HasAutoPilot -eq $false){
+        Write-Host "Disabling $($Device.DisplayName) [$($Device.Id)]" 
+
+		Update-MgDevice `
+			-DeviceId $Device.Id `
+			-BodyParameter $Disable `
+		
+		Write-Host "Deleting $($Device.DisplayName) [$($Device.Id)]"
+
+        Remove-MgDevice -DeviceId $Device.Id
+    }
+	elseif ($Device.TrustType -eq "ServerAD" -or $Device.TrustType -eq "Workplace") {
 		
 		Write-Host "Deleting $($Device.DisplayName) [$($Device.Id)]"
 		
-		Remove-MgDevice `
-			-DeviceId $Device.Id
+		Remove-MgDevice -DeviceId $Device.Id
 	}		
 }
